@@ -9,3 +9,6 @@ xgboost
 shap
 joblib
 ucimlrepo
+fastapi
+uvicorn
+requests

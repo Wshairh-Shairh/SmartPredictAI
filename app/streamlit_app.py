@@ -1,12 +1,34 @@
 import streamlit as st
 import joblib
 import pandas as pd
+from groq import Groq
+from dotenv import load_dotenv
+import os
+import requests
+
+load_dotenv()
+
+client = Groq(
+    api_key=os.getenv("GROQ_API_KEY")
+)
 
 st.set_page_config(
     page_title="SmartPredict AI",
     page_icon="⚙️",
     layout="centered"
 )
+defaults = {
+    "prediction_done": False,
+    "prediction": 0,
+    "probability": 0,
+    "risk_level": "UNKNOWN",
+    "recommendation": "No recommendation yet.",
+    "work_instruction": "No work instructions available."
+}
+
+for key, value in defaults.items():
+    if key not in st.session_state:
+        st.session_state[key] = value
 # Load trained model
 model = joblib.load("models/xgboost_model.pkl")
 
@@ -23,6 +45,7 @@ st.sidebar.success("Model: XGBoost")
 
 st.sidebar.write("Version: 1.0")
 st.caption("AI-Powered Predictive Maintenance Platform")
+
 st.subheader("Predictive Maintenance System")
 
 st.write("Enter machine parameters to predict failure risk.")
@@ -65,57 +88,70 @@ input_data = pd.DataFrame({
     "Type_M": [type_m]
 })
 
-# Prediction button
-# Prediction button
+# call API to get prediction and probability
 if st.button("Predict Failure"):
 
-    prediction = model.predict(input_data)[0]
-    probability = model.predict_proba(input_data)[0][1]
+    response = requests.post(
+        "http://localhost:8000/predict",
+        json={
+            "air_temp": air_temp,
+            "process_temp": process_temp,
+            "rotational_speed": rotational_speed,
+            "torque": torque,
+            "tool_wear": tool_wear,
+            "machine_type": machine_type
+        }
+    )
 
-    if prediction == 1:
+    result = response.json()
 
+    prediction = result["prediction_value"]
+    probability = result["failure_probability"]
+    risk_level = result["risk_level"]
+    recommendation = result["recommendation"]
+    work_instruction = "\n".join(result["work_instructions"])
+
+    # Save latest prediction to session_state
+    st.session_state.prediction_done = True
+    st.session_state.prediction = prediction
+    st.session_state.probability = probability
+    st.session_state.risk_level = risk_level
+    st.session_state.recommendation = recommendation
+    st.session_state.work_instruction = work_instruction
+
+
+# Always display latest prediction after rerun
+if st.session_state.prediction_done:
+
+    if st.session_state.prediction == 1:
         st.error("⚠️ High Risk of Machine Failure!")
-
-        if probability > 0.8:
-
-            risk_level = "CRITICAL"
-            recommendation = "Immediate maintenance recommended."
-
-        elif probability > 0.5:
-
-            risk_level = "MEDIUM"
-            recommendation = "Schedule maintenance soon."
-
-        else:
-
-            risk_level = "LOW"
-            recommendation = "Monitor machine carefully."
-
-        st.metric("Failure Risk", risk_level)
-        st.warning(recommendation)
-
     else:
-
-        risk_level = "LOW"
-        recommendation = "No immediate maintenance required."
-
         st.success("✅ Machine Operating Normally")
-        st.metric("Failure Risk", risk_level)
-        st.info(recommendation)
+
+    st.metric("Failure Risk", st.session_state.risk_level)
+
+    if st.session_state.risk_level == "CRITICAL":
+        st.warning("Immediate maintenance recommended.")
+    else:
+        st.info(st.session_state.recommendation)
 
     st.metric(
         label="Failure Probability",
-        value=f"{probability*100:.2f}%"
+        value=f"{st.session_state.probability*100:.2f}%"
     )
+
+    if st.session_state.risk_level == "CRITICAL":
+        st.subheader("🛠️ Work Instructions")
+        st.markdown(st.session_state.work_instruction)
 
     report = f"""
 SmartPredict AI - Maintenance Report
 
-Prediction: {"FAILURE" if prediction == 1 else "NORMAL"}
+Prediction: {"FAILURE" if st.session_state.prediction == 1 else "NORMAL"}
 
-Failure Probability: {probability*100:.2f}%
+Failure Probability: {st.session_state.probability*100:.2f}%
 
-Risk Level: {risk_level}
+Risk Level: {st.session_state.risk_level}
 
 Air Temperature: {air_temp}
 Process Temperature: {process_temp}
@@ -125,7 +161,7 @@ Tool Wear: {tool_wear}
 Machine Type: {machine_type}
 
 Recommendation:
-{recommendation}
+{st.session_state.recommendation}
 """
 
     st.download_button(
@@ -134,3 +170,68 @@ Recommendation:
         file_name="maintenance_report.txt",
         mime="text/plain"
     )
+
+    st.divider()
+
+st.subheader("🛠 AI Maintenance Assistant")
+if st.session_state.risk_level == "CRITICAL":
+
+    st.warning(
+        "⚠️ Critical condition detected. I can help you diagnose the issue, "
+        "prioritize inspection steps, and explain how to reduce the failure risk."
+    )
+
+    with st.chat_message("assistant"):
+        st.write(
+            "The machine is currently in a CRITICAL condition. "
+            "You can ask me: 'What should I inspect first?', "
+            "'Why is this machine critical?', or "
+            "'How can I reduce the risk?'"
+        )
+user_question = st.chat_input(
+    "Ask about machine maintenance..."
+)
+
+if user_question:
+
+    with st.chat_message("user"):
+        st.write(user_question)
+
+    system_prompt = f"""
+    You are an industrial maintenance AI assistant.
+
+    Current machine status:
+    Risk Level: 
+    {st.session_state.risk_level}
+
+
+    Failure Probability: 
+    {st.session_state.probability*100:.2f}%
+
+    Recommendation:
+    {st.session_state.recommendation}
+
+    Work Instructions:
+    {st.session_state.work_instruction}
+
+    Explain clearly for maintenance engineers.
+    """
+
+    response = client.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[
+            {
+                "role": "system",
+                "content": system_prompt
+            },
+            {
+                "role": "user",
+                "content": user_question
+            }
+        ]
+    )
+
+    ai_reply = response.choices[0].message.content
+
+    with st.chat_message("assistant"):
+        st.write(ai_reply)
